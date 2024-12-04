@@ -3,10 +3,12 @@ $wsh = New-Object -ComObject WScript.Shell
 
 # Infinite loop
 while ($true) {
-    # Try to activate the Teams process by process name
-    $teamsProcess = Get-Process -Name "ms-teams" -ErrorAction SilentlyContinue
+    # Try to get the Teams process with a valid MainWindowTitle
+    $teamsProcess = Get-Process -Name "ms-teams" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" }
+
     if ($teamsProcess) {
-        if ($wsh.AppActivate("Microsoft Teams")) {
+        # Attempt to activate the Teams window using its exact title
+        if ($wsh.AppActivate($teamsProcess.MainWindowTitle)) {
             Write-Host "Microsoft Teams activated."
             Start-Sleep -Milliseconds 500 # Allow time for activation
 
@@ -21,7 +23,7 @@ while ($true) {
             Write-Host "Failed to activate Microsoft Teams."
         }
     } else {
-        Write-Host "Microsoft Teams process not found. Retrying..."
+        Write-Host "Microsoft Teams process not found or no active window. Retrying..."
     }
 
     # Wait for 59 seconds before the next iteration
