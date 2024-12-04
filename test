@@ -3,8 +3,8 @@ $wsh = New-Object -ComObject WScript.Shell
 
 # Infinite loop
 while ($true) {
-    # Try to activate the Microsoft Teams window
-    if ($wsh.AppActivate("Microsoft Teams")) {
+    #activate the Microsoft Teams window
+    if ($wsh.AppActivate("Teams")) {
         Start-Sleep -Milliseconds 500 # Allow time for the window to activate
 
         # Send CTRL+2 to Microsoft Teams
@@ -12,7 +12,5 @@ while ($true) {
     } else {
         Write-Host "Microsoft Teams window not found. Retrying..."
     }
-
-    # Wait for 59 seconds before repeating
-    Start-Sleep -Seconds 59
+    Start-Sleep -Seconds 280
 }
