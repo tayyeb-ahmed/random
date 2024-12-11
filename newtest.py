@@ -9,32 +9,7 @@ import json
 import datetime
 from dateutil.relativedelta import relativedelta
 
-# Service mapping dictionary to convert CloudTrail eventSource to service names
-service_mapping = {
-    "rolesanywhere.amazonaws.com": "IAM",
-    "elasticloadbalancing.amazonaws.com": "EC2",
-    "acm-pca.amazonaws.com": "ACMPCA",
-    "monitoring.amazonaws.com": "CloudWatch",
-    "logs.amazonaws.com": "CloudWatch",
-    "sts.amazonaws.com": "IAM",
-    "inspector2.amazonaws.com": "InspectorV2",
-    "elasticfilesystem.amazonaws.com": "EFS",
-    "organizations.amazonaws.com": "Organizations",
-    "organization.amazonaws.com": "Organizations",
-    "schemas.amazonaws.com": "EventSchemas",
-    "transfer.amazonaws.com": "TransferFamily",
-    "resource-groups.amazonaws.com": "ResourceGroups",
-    "resourcegroups.amazonaws.com": "ResourceGroups",
-    "support.amazonaws.com": "Support",
-    "q.amazonaws.com": "Q",
-    "fsx.amazonaws.com": "FSx",
-    "cloudshell.amazonaws.com": "CloudShell",
-    "signin.amazonaws.com": "IAM",
-    "tagging.amazonaws.com": "ResourceGroupsAndTagEditor",
-    "tag.amazonaws.com": "ResourceGroupsAndTagEditor"
-}
-
-# Consolidated approved services list in regular case
+# Consolidated approved services list
 approved_services = [
     "ACM", "ACMPCA", "AccessAnalyzer", "ApiGateway", "ApiGatewayV2", 
     "AppConfig", "AppStream", "Athena", "AuditManager", "AutoScaling", 
@@ -50,23 +25,6 @@ approved_services = [
     "SES", "SNS", "SQS", "SSM", "SecretsManager", "ServiceDiscovery", 
     "StepFunctions", "Support", "TransferFamily", "WAFv2"
 ]
-
-# Create case-insensitive lookup dictionary
-service_display_names = {name.lower(): name for name in approved_services}
-
-def normalize_service_name(eventsource):
-    """Convert CloudTrail eventSource to normalized service name"""
-    # Check if there's a mapping for this service
-    if eventsource in service_mapping:
-        mapped_name = service_mapping[eventsource]
-        # Return the display name if we have it, otherwise return the mapped name
-        return service_display_names.get(mapped_name.lower(), mapped_name)
-    
-    # If no mapping exists, clean up the service name
-    service = eventsource.replace(".amazonaws.com", "").replace("-", "")
-    # Convert first letter to uppercase for display
-    display_name = service[0].upper() + service[1:] if service else service
-    return display_name
 
 def execute_query(athena, sql_query):
     """Execute Athena query and return execution ID"""
@@ -103,19 +61,34 @@ def print_columns(in_use, not_in_use, unapproved):
         print(fmt.format(in_use_svc, not_in_use_svc, unapproved_svc))
     print("")
 
-def main():
-    # Verify account
-    this_account_id = boto3.client("sts").get_caller_identity()["Account"]
-    if this_account_id != '236223658093':
-        print("\nThis program should be run via CloudShell in the us-security account\n")
-        sys.exit(1)
-
-    # Initialize Athena client
-    athena = boto3.client('athena')
-
-    # Get the previous month
-    last_month = (datetime.datetime.now() - relativedelta(months=1)).strftime('%Y/%m')
-    sql_query = f"SELECT DISTINCT eventsource FROM \"prod-cloudtraildb\".\"prod-cloudtraillogs\" WHERE day LIKE '{last_month}/%' and readonly='false'"
+def get_service_info(athena, last_month):
+    """Query CloudTrail and process the results to get unique services"""
+    sql_query = f"""
+    SELECT DISTINCT
+        COALESCE(
+            userIdentity.invokedBy,
+            CASE
+                WHEN eventSource LIKE 'sts.%' THEN 'IAM'
+                WHEN eventSource LIKE 'signin.%' THEN 'IAM'
+                WHEN eventSource LIKE 'monitoring.%' THEN 'CloudWatch'
+                WHEN eventSource LIKE 'logs.%' THEN 'CloudWatch'
+                WHEN eventSource LIKE 'elasticloadbalancing.%' THEN 'EC2'
+                WHEN eventSource LIKE 'firehose.%' THEN 'KinesisFirehose'
+                WHEN eventSource LIKE 'kinesis.%' THEN 'Kinesis'
+                WHEN eventSource LIKE 'analyticsv2.%' THEN 'KinesisAnalyticsV2'
+                ELSE REGEXP_REPLACE(
+                    REGEXP_REPLACE(eventSource, '\\.amazonaws\\.com$', ''),
+                    '^([a-z0-9])',
+                    UPPER(REGEXP_EXTRACT(eventSource, '^([a-z0-9])', 1))
+                )
+            END
+        ) as service_name
+    FROM "prod-cloudtraildb"."prod-cloudtraillogs"
+    WHERE day LIKE '{last_month}/%'
+        AND readonly='false'
+        AND eventSource != 'portal.amazonaws.com'  -- Exclude portal events
+    """
+    
     print(f"\n\nUsing SQL query: {sql_query}\n")
 
     # Execute query
@@ -130,32 +103,45 @@ def main():
     print(". (Done)")
 
     # Get results
-    results = []
+    services = set()
     for page in athena.get_paginator('get_query_results').paginate(QueryExecutionId=execution_id):
         for row in page['ResultSet']['Rows']:
-            results.append(row)
+            if row['Data'][0]['VarCharValue'] != 'service_name':  # Skip header row
+                services.add(row['Data'][0]['VarCharValue'])
+    
+    return services
 
-    # Process services
-    services_in_use = set()
-    for row in results:
-        service = row['Data'][0]['VarCharValue']
-        if service != "eventsource":
-            normalized_service = normalize_service_name(service)
-            services_in_use.add(normalized_service)
+def main():
+    # Verify account
+    this_account_id = boto3.client("sts").get_caller_identity()["Account"]
+    if this_account_id != '236223658093':
+        print("\nThis program should be run via CloudShell in the us-security account\n")
+        sys.exit(1)
 
-    # Create sets for comparison using lowercase
-    services_in_use_lower = {s.lower() for s in services_in_use}
-    approved_services_lower = {s.lower() for s in approved_services}
+    # Initialize Athena client
+    athena = boto3.client('athena')
 
-    # Perform set operations with lowercase names
-    approved_in_use_lower = services_in_use_lower.intersection(approved_services_lower)
-    unapproved_in_use_lower = services_in_use_lower - approved_services_lower
-    approved_not_in_use_lower = approved_services_lower - services_in_use_lower
+    # Get the previous month
+    last_month = (datetime.datetime.now() - relativedelta(months=1)).strftime('%Y/%m')
 
-    # Convert back to display names for output
-    approved_in_use = {service_display_names.get(s, s) for s in approved_in_use_lower}
-    unapproved_in_use = {s[0].upper() + s[1:] for s in unapproved_in_use_lower}
-    approved_not_in_use = {service_display_names[s] for s in approved_not_in_use_lower}
+    # Get services from CloudTrail
+    services_in_use = get_service_info(athena, last_month)
+
+    # Create lookup for approved services (case-insensitive)
+    approved_services_lookup = {s.lower(): s for s in approved_services}
+    
+    # Categorize services using case-insensitive comparison
+    approved_in_use = set()
+    unapproved_in_use = set()
+    
+    for service in services_in_use:
+        if service.lower() in approved_services_lookup:
+            approved_in_use.add(approved_services_lookup[service.lower()])
+        else:
+            unapproved_in_use.add(service)
+    
+    # Get services not in use
+    approved_not_in_use = {s for s in approved_services if s not in approved_in_use}
 
     # Print results in columns
     print_columns(approved_in_use, approved_not_in_use, unapproved_in_use)
