@@ -34,7 +34,7 @@ service_mapping = {
     "tag.amazonaws.com": "ResourceGroupsAndTagEditor"
 }
 
-# Consolidated approved services list - simplified without AWS:: prefix
+# Consolidated approved services list in regular case
 approved_services = [
     "ACM", "ACMPCA", "AccessAnalyzer", "ApiGateway", "ApiGatewayV2", 
     "AppConfig", "AppStream", "Athena", "AuditManager", "AutoScaling", 
@@ -51,13 +51,22 @@ approved_services = [
     "StepFunctions", "Support", "TransferFamily", "WAFv2"
 ]
 
+# Create case-insensitive lookup dictionary
+service_display_names = {name.lower(): name for name in approved_services}
+
 def normalize_service_name(eventsource):
     """Convert CloudTrail eventSource to normalized service name"""
     # Check if there's a mapping for this service
     if eventsource in service_mapping:
-        return service_mapping[eventsource]
-    # If no mapping exists, return the service name without domain
-    return eventsource.replace(".amazonaws.com", "").upper()
+        mapped_name = service_mapping[eventsource]
+        # Return the display name if we have it, otherwise return the mapped name
+        return service_display_names.get(mapped_name.lower(), mapped_name)
+    
+    # If no mapping exists, clean up the service name
+    service = eventsource.replace(".amazonaws.com", "").replace("-", "")
+    # Convert first letter to uppercase for display
+    display_name = service[0].upper() + service[1:] if service else service
+    return display_name
 
 def execute_query(athena, sql_query):
     """Execute Athena query and return execution ID"""
@@ -134,16 +143,22 @@ def main():
             normalized_service = normalize_service_name(service)
             services_in_use.add(normalized_service)
 
-    # Convert approved services to set for comparison
-    all_approved_services = set(approved_services)
+    # Create sets for comparison using lowercase
+    services_in_use_lower = {s.lower() for s in services_in_use}
+    approved_services_lower = {s.lower() for s in approved_services}
 
-    # Categorize services
-    approved_services_in_use = services_in_use.intersection(all_approved_services)
-    unapproved_services_in_use = services_in_use - all_approved_services
-    approved_services_not_in_use = all_approved_services - services_in_use
+    # Perform set operations with lowercase names
+    approved_in_use_lower = services_in_use_lower.intersection(approved_services_lower)
+    unapproved_in_use_lower = services_in_use_lower - approved_services_lower
+    approved_not_in_use_lower = approved_services_lower - services_in_use_lower
+
+    # Convert back to display names for output
+    approved_in_use = {service_display_names.get(s, s) for s in approved_in_use_lower}
+    unapproved_in_use = {s[0].upper() + s[1:] for s in unapproved_in_use_lower}
+    approved_not_in_use = {service_display_names[s] for s in approved_not_in_use_lower}
 
     # Print results in columns
-    print_columns(approved_services_in_use, approved_services_not_in_use, unapproved_services_in_use)
+    print_columns(approved_in_use, approved_not_in_use, unapproved_in_use)
 
 if __name__ == "__main__":
     main()
