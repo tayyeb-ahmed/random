@@ -6,6 +6,7 @@ import sys
 import boto3
 import time
 import datetime
+import argparse
 from dateutil.relativedelta import relativedelta
 
 # List of approved services
@@ -101,17 +102,18 @@ service_prefixes = {
 
 def normalize_eventSource(eventSource):
     """Convert eventSource to service name using prefix mapping"""
-    # Remove .amazonaws.com and get the prefix
-    service = eventSource.replace(".amazonaws.com", "")
-    # Take everything before the first hyphen if it exists
-    prefix = service.split("-")[0]
+    # Remove .amazonaws.com and convert to lowercase for comparison
+    service = eventSource.replace(".amazonaws.com", "").lower()
     
-    # Check if we have a mapping for the full service name first
+    # Check if we have a direct mapping
     if service in service_prefixes:
         return service_prefixes[service]
-    # Then check the prefix
-    if prefix in service_prefixes:
-        return service_prefixes[prefix]
+        
+    # If no direct match, check each prefix
+    for prefix, mapped_service in service_prefixes.items():
+        if service.startswith(prefix):
+            return mapped_service
+            
     # If no mapping found, return the original service name
     return service
 
@@ -146,6 +148,11 @@ def print_columns(in_use, not_in_use, unapproved):
     print("")
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Analyze AWS service usage from CloudTrail logs')
+    parser.add_argument('--query-id', help='Reuse results from a previous query')
+    args = parser.parse_args()
+
     # Verify account
     this_account_id = boto3.client("sts").get_caller_identity()["Account"]
     if this_account_id != '236223658093':
@@ -155,30 +162,34 @@ def main():
     # Initialize Athena client
     athena = boto3.client('athena')
 
-    # Get the previous month
-    last_month = (datetime.datetime.now() - relativedelta(months=1)).strftime('%Y/%m')
-    
-    # Simple query to get distinct eventSources
-    sql_query = f"""
-    SELECT DISTINCT eventsource 
-    FROM "prod-cloudtraildb"."prod-cloudtraillogs" 
-    WHERE day LIKE '{last_month}/%' 
-    AND readonly='false'
-    AND eventsource != 'portal.amazonaws.com'
-    """
-    
-    print(f"\n\nUsing SQL query: {sql_query}\n")
+    if args.query_id:
+        execution_id = args.query_id
+        print(f"\nReusing results from query execution ID: {execution_id}")
+    else:
+        # Get the previous month
+        last_month = (datetime.datetime.now() - relativedelta(months=1)).strftime('%Y/%m')
+        
+        # Simple query to get distinct eventSources
+        sql_query = f"""
+        SELECT DISTINCT eventsource 
+        FROM "prod-cloudtraildb"."prod-cloudtraillogs" 
+        WHERE day LIKE '{last_month}/%' 
+        AND readonly='false'
+        AND eventsource != 'portal.amazonaws.com'
+        """
+        
+        print(f"\n\nUsing SQL query: {sql_query}\n")
 
-    # Execute query
-    execution_id = execute_query(athena, sql_query)
-    status = "RUNNING"
-    print(f"\nQuerying CloudTrail for services in use (Athena query execution ID {execution_id}) ...", end='')
-    
-    while status == "RUNNING":
-        time.sleep(2)
-        status = athena.get_query_execution(QueryExecutionId=execution_id)['QueryExecution']['Status']['State']
-        print(".", end='')
-    print(". (Done)")
+        # Execute query
+        execution_id = execute_query(athena, sql_query)
+        status = "RUNNING"
+        print(f"\nQuerying CloudTrail for services in use (Athena query execution ID {execution_id}) ...", end='')
+        
+        while status == "RUNNING":
+            time.sleep(2)
+            status = athena.get_query_execution(QueryExecutionId=execution_id)['QueryExecution']['Status']['State']
+            print(".", end='')
+        print(". (Done)")
 
     # Get results
     services_in_use = set()
@@ -197,6 +208,9 @@ def main():
 
     # Print results
     print_columns(approved_in_use, not_in_use, unapproved_in_use)
+    
+    # Print the query ID for reuse
+    print(f"\nTo reuse these results, run with: --query-id {execution_id}\n")
 
 if __name__ == "__main__":
     main()
